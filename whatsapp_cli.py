@@ -254,7 +254,9 @@ def list_messages(sender="", limit=10):
         ts = m.get("timestamp", "")
         if "T" in ts:
             ts = ts.split("T")[1][:8]
-        print(f"[{ts}] +{sender_phone}{push_name}{from_me}:")
+        msg_id = m.get("id", "")
+        id_display = f" [ID: {msg_id}]" if msg_id else ""
+        print(f"[{ts}] +{sender_phone}{push_name}{from_me}{id_display}:")
         print(f"   {m.get('message')}")
         print("─" * 60)
     st = _req("GET", "/api/status")
@@ -297,6 +299,34 @@ def sanitize_text(text: str) -> str:
         cleaned_chars.append(ch)
     return "".join(cleaned_chars)
 
+def edit_message(msg_id, new_text, chat=""):
+    """Edita un mensaje ya enviado en WhatsApp."""
+    clean_text = sanitize_text(new_text)
+    payload = {"id": msg_id, "text": clean_text}
+    if chat:
+        payload["chat"] = "".join(filter(str.isdigit, str(chat)))
+    st = _req("POST", "/api/edit", payload)
+    if st is None:
+        print("❌ Error: El servicio WhatsApp Bridge no está corriendo. Ejecutá 'whatsapp start'.")
+        return
+    if st.get("status") == "edited":
+        print(f"✏️ Mensaje {msg_id} editado exitosamente en WhatsApp: '{clean_text}'")
+    else:
+        print(f"❌ Error al editar mensaje: {st.get('error', st)}")
+
+def revoke_message(msg_id, chat=""):
+    """Elimina un mensaje para todos en WhatsApp."""
+    payload = {"id": msg_id}
+    if chat:
+        payload["chat"] = "".join(filter(str.isdigit, str(chat)))
+    st = _req("POST", "/api/revoke", payload)
+    if st is None:
+        print("❌ Error: El servicio WhatsApp Bridge no está corriendo. Ejecutá 'whatsapp start'.")
+        return
+    if st.get("status") == "revoked":
+        print(f"🗑️ Mensaje {msg_id} eliminado para todos en WhatsApp.")
+    else:
+        print(f"❌ Error al eliminar mensaje: {st.get('error', st)}")
 def send_message(phone, text):
     """Envía un mensaje a un número telefónico (ej: 5492494123456)."""
     clean_phone = "".join(filter(str.isdigit, str(phone)))
@@ -306,7 +336,9 @@ def send_message(phone, text):
         print("❌ Error: El servicio WhatsApp Bridge no está corriendo. Ejecutá 'whatsapp start'.")
         return
     if st.get("status") == "sent" or st.get("success"):
-        print(f"✅ Mensaje enviado a +{clean_phone}: '{clean_text[:60]}...'")
+        msg_id = st.get("id", "")
+        id_str = f" [ID: {msg_id}]" if msg_id else ""
+        print(f"✅ Mensaje enviado a +{clean_phone}{id_str}: '{clean_text[:60]}...'")
     else:
         print(f"❌ Error al enviar mensaje: {st.get('error', st)}")
 
@@ -490,10 +522,15 @@ Gestión del Servicio:
   logout                                Cierra la sesión activa en el dispositivo
 
 Mensajería & Archivos:
-  inbox       [telefono] [limite]       📥 Lee los mensajes recibidos (persistidos en SQLite local)
+  inbox       [telefono] [limite]       📥 Lee los mensajes recibidos (con IDs de mensaje)
   contacts    [busqueda] [limite]       👥 Lista o busca en la agenda de contactos sincronizada
-  send        <telefono> ["<mensaje>"]  Envía un mensaje de texto plano o pipe
+  send        <telefono> ["<mensaje>"]  Envía un mensaje de texto plano o pipe (muestra ID de mensaje)
                                           cat reporte.txt | whatsapp send 5492494123456
+  edit        <id> "<nuevo texto>" [tel]
+                                        ✏️ Edita un mensaje enviado en WhatsApp (15 min)
+                                          whatsapp edit 3EB0... "Texto corregido"
+  delete      <id> [telefono]           🗑️ Elimina un mensaje para todos en WhatsApp
+                                          whatsapp delete 3EB0...
   send-file   <telefono> <ruta> [epígrafe]
                                         Envía cualquier archivo (PDF, ZIP, imagen, video, audio)
                                           whatsapp send-file 5492494123456 reporte.pdf "Reporte mensual"
@@ -528,6 +565,15 @@ if __name__ == "__main__":
         q = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else ""
         limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else (int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 20)
         list_contacts(query=q, limit=limit)
+    elif cmd == "edit" and len(sys.argv) >= 4:
+        msg_id = sys.argv[2]
+        new_text = sys.argv[3]
+        chat = sys.argv[4] if len(sys.argv) > 4 else ""
+        edit_message(msg_id, new_text, chat=chat)
+    elif cmd in ("delete", "revoke") and len(sys.argv) >= 3:
+        msg_id = sys.argv[2]
+        chat = sys.argv[3] if len(sys.argv) > 3 else ""
+        revoke_message(msg_id, chat=chat)
     elif cmd == "send-file" and len(sys.argv) >= 4:
         cap = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
         send_file(sys.argv[2], sys.argv[3], caption=cap)

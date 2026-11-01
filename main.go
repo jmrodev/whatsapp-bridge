@@ -237,7 +237,7 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[Send] Fallback JID: %s for input: %s\n", recipientJID.String(), req.Recipient)
 	}
 
-	_, err := c.SendMessage(context.Background(), recipientJID, &waE2E.Message{
+	resp, err := c.SendMessage(context.Background(), recipientJID, &waE2E.Message{
 		Conversation: proto.String(req.Message),
 	})
 
@@ -246,8 +246,183 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist our own outgoing message in local SQLite DB
+	if appDB != nil {
+		go func(msgID, rPhone, text string, ts time.Time) {
+			_, _ = appDB.Exec(`
+				INSERT OR IGNORE INTO messages (id, chat_jid, sender, push_name, message, is_from_me, timestamp)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+			`, msgID, recipientJID.String(), rPhone, "Me", text, true, ts)
+		}(resp.ID, cleanPhone, req.Message, resp.Timestamp)
+	}
+
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "sent",
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp,
+	})
+}
+
+type EditRequest struct {
+	ChatID    string `json:"chat"`
+	MessageID string `json:"id"`
+	NewText   string `json:"text"`
+}
+
+func handleEdit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req EditRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.MessageID == "" || req.NewText == "" {
+		http.Error(w, "id and text are required", http.StatusBadRequest)
+		return
+	}
+
+	clientMu.Lock()
+	c := client
+	clientMu.Unlock()
+
+	if c == nil || !isClientAuthenticated(c) || !c.IsConnected() {
+		http.Error(w, "bridge unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Resolve chat JID
+	var chatJID types.JID
+	if strings.Contains(req.ChatID, "@") {
+		chatJID, _ = types.ParseJID(req.ChatID)
+	} else if req.ChatID != "" {
+		cleanPhone := strings.Join(filterDigits(req.ChatID), "")
+		chatJID, _ = types.ParseJID(cleanPhone + "@s.whatsapp.net")
+	}
+
+	// If chatJID not provided, look up from DB
+	if chatJID.IsEmpty() && appDB != nil {
+		var storedChat string
+		_ = appDB.QueryRow("SELECT chat_jid FROM messages WHERE id = ?", req.MessageID).Scan(&storedChat)
+		if storedChat != "" {
+			chatJID, _ = types.ParseJID(storedChat)
+		}
+	}
+
+	if chatJID.IsEmpty() {
+		http.Error(w, "Could not determine chat JID for message ID", http.StatusBadRequest)
+		return
+	}
+
+	editMsg := c.BuildEdit(chatJID, types.MessageID(req.MessageID), &waE2E.Message{
+		Conversation: proto.String(req.NewText),
+	})
+
+	resp, err := c.SendMessage(context.Background(), chatJID, editMsg)
+	if err != nil {
+		http.Error(w, "Failed to edit message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Update in local DB
+	if appDB != nil {
+		_, _ = appDB.Exec("UPDATE messages SET message = ? WHERE id = ?", req.NewText, req.MessageID)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "edited",
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp,
+	})
+}
+
+type RevokeRequest struct {
+	ChatID    string `json:"chat"`
+	MessageID string `json:"id"`
+}
+
+func handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req RevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.MessageID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	clientMu.Lock()
+	c := client
+	clientMu.Unlock()
+
+	if c == nil || !isClientAuthenticated(c) || !c.IsConnected() {
+		http.Error(w, "bridge unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Resolve chat JID
+	var chatJID types.JID
+	if strings.Contains(req.ChatID, "@") {
+		chatJID, _ = types.ParseJID(req.ChatID)
+	} else if req.ChatID != "" {
+		cleanPhone := strings.Join(filterDigits(req.ChatID), "")
+		chatJID, _ = types.ParseJID(cleanPhone + "@s.whatsapp.net")
+	}
+
+	if chatJID.IsEmpty() && appDB != nil {
+		var storedChat string
+		_ = appDB.QueryRow("SELECT chat_jid FROM messages WHERE id = ?", req.MessageID).Scan(&storedChat)
+		if storedChat != "" {
+			chatJID, _ = types.ParseJID(storedChat)
+		}
+	}
+
+	if chatJID.IsEmpty() {
+		http.Error(w, "Could not determine chat JID for message ID", http.StatusBadRequest)
+		return
+	}
+
+	revokeMsg := c.BuildRevoke(chatJID, types.EmptyJID, types.MessageID(req.MessageID))
+	resp, err := c.SendMessage(context.Background(), chatJID, revokeMsg)
+	if err != nil {
+		http.Error(w, "Failed to revoke message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Mark as revoked/deleted in local DB
+	if appDB != nil {
+		_, _ = appDB.Exec("UPDATE messages SET message = '[Mensaje eliminado para todos]' WHERE id = ?", req.MessageID)
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "revoked",
+		"id":        resp.ID,
+		"timestamp": resp.Timestamp,
+	})
+}
+
+func filterDigits(s string) []string {
+	var res []string
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			res = append(res, string(r))
+		}
+	}
+	return res
 }
 
 func handleSendMedia(w http.ResponseWriter, r *http.Request) {
@@ -809,6 +984,8 @@ func main() {
 	connectClient()
 
 	http.HandleFunc("/api/send", handleSend)
+	http.HandleFunc("/api/edit", handleEdit)
+	http.HandleFunc("/api/revoke", handleRevoke)
 	http.HandleFunc("/api/send-media", handleSendMedia)
 	http.HandleFunc("/api/messages", handleMessages)
 	http.HandleFunc("/api/contacts", handleContacts)
