@@ -164,6 +164,56 @@ def show_qr():
     else:
         print(f"🖼️ Podés ver la imagen en: {qr_img_path}")
 
+def list_messages(sender="", limit=10):
+    """Muestra los mensajes recientes recibidos en la terminal."""
+    params = []
+    if sender:
+        clean = "".join(filter(str.isdigit, str(sender)))
+        params.append(f"sender={clean}")
+    if limit:
+        params.append(f"limit={limit}")
+    query = "?" + "&".join(params) if params else ""
+    st = _req("GET", f"/api/messages{query}")
+    if not st or "messages" not in st:
+        print("❌ Error al consultar mensajes del bridge.")
+        return
+
+    msgs = st.get("messages", [])
+    if not msgs:
+        print("📭 No hay mensajes nuevos registrados en el bridge.")
+        return
+
+    print(f"\n📩 Últimos {len(msgs)} mensajes recibidos:")
+    print("─" * 60)
+    for m in reversed(msgs):
+        sender_phone = m.get("sender", "Desconocido")
+        push_name = f" ({m.get('pushName')})" if m.get("pushName") else ""
+        from_me = " [Enviado por mí]" if m.get("isFromMe") else ""
+        ts = m.get("timestamp", "")
+        if "T" in ts:
+            ts = ts.split("T")[1][:8]
+        print(f"[{ts}] +{sender_phone}{push_name}{from_me}:")
+        print(f"   {m.get('message')}")
+        print("─" * 60)
+    st = _req("GET", "/api/status")
+    if not st or not st.get("qr_code"):
+        print("❌ No hay un código QR activo en este momento. Verificá con 'whatsapp status'.")
+        return
+    qr_img_path = BRIDGE_DIR / "whatsapp_qr.png"
+    if not qr_img_path.exists():
+        get_status()
+    # Intentar abrir con el visor preferido del sistema (nsxiv, xdg-open, etc.)
+    viewer = None
+    for cmd in ["nsxiv", "xdg-open", "display"]:
+        if subprocess.run(["which", cmd], capture_output=True).returncode == 0:
+            viewer = cmd
+            break
+    if viewer:
+        print(f"🚀 Abriendo QR en ventana ({viewer})...")
+        subprocess.Popen([viewer, str(qr_img_path)], start_new_session=True, close_fds=True)
+    else:
+        print(f"🖼️ Podés ver la imagen en: {qr_img_path}")
+
 def sanitize_text(text: str) -> str:
     """
     Limpia secuencias de escape ANSI (colores de terminal) y glifos privados
@@ -378,6 +428,7 @@ Gestión del Servicio:
   logout                                Cierra la sesión activa en el dispositivo
 
 Mensajería & Archivos:
+  inbox       [telefono] [limite]       📥 Lee los mensajes recibidos (ej: whatsapp inbox o whatsapp inbox 5492494123456)
   send        <telefono> ["<mensaje>"]  Envía un mensaje de texto plano o pipe
                                           cat reporte.txt | whatsapp send 5492494123456
   send-file   <telefono> <ruta> [epígrafe]
@@ -406,6 +457,10 @@ if __name__ == "__main__":
         refresh()
     elif cmd == "logout":
         logout()
+    elif cmd == "inbox":
+        sender = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else ""
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else (int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 10)
+        list_messages(sender=sender, limit=limit)
     elif cmd == "send-file" and len(sys.argv) >= 4:
         cap = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
         send_file(sys.argv[2], sys.argv[3], caption=cap)

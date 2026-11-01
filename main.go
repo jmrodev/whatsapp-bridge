@@ -38,12 +38,25 @@ var (
 	clientLog waLog.Logger
 	dbLog     waLog.Logger
 
+	// Recent messages in-memory ring buffer (up to 100 messages)
+	recentMessagesMu sync.RWMutex
+	recentMessages   []IncomingMessage
+
 	// Reconnection lifecycle state (guarded by reconnectMu).
 	reconnectMu         sync.Mutex
 	reconnectState      string // "idle" | "reconnecting" | "awaiting_admin"
 	reconnectAttempts   int
 	sessionExpiredSince time.Time
 )
+
+type IncomingMessage struct {
+	ID        string    `json:"id"`
+	Sender    string    `json:"sender"`
+	PushName  string    `json:"pushName,omitempty"`
+	Message   string    `json:"message"`
+	IsFromMe  bool      `json:"isFromMe"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
 // isClientAuthenticated reports whether the bridge holds a live WhatsApp session.
 // Declared as a var (instead of a plain func) so tests can inject a fake client
@@ -72,6 +85,23 @@ func eventHandler(evt interface{}) {
 			} else if !v.Info.IsFromMe && v.Info.SenderAlt.User != "" {
 				realPhoneNumber = v.Info.SenderAlt.User
 			}
+
+			msgItem := IncomingMessage{
+				ID:        v.Info.ID,
+				Sender:    realPhoneNumber,
+				PushName:  v.Info.PushName,
+				Message:   msgText,
+				IsFromMe:  v.Info.IsFromMe,
+				Timestamp: v.Info.Timestamp,
+			}
+
+			// Store in ring buffer
+			recentMessagesMu.Lock()
+			recentMessages = append(recentMessages, msgItem)
+			if len(recentMessages) > 100 {
+				recentMessages = recentMessages[len(recentMessages)-100:]
+			}
+			recentMessagesMu.Unlock()
 
 			payload := map[string]interface{}{
 				"sender":   realPhoneNumber,
@@ -390,6 +420,41 @@ func handleSendMedia(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	filterSender := r.URL.Query().Get("sender")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 20
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+		limit = l
+	}
+
+	recentMessagesMu.RLock()
+	defer recentMessagesMu.RUnlock()
+
+	var result []IncomingMessage
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		m := recentMessages[i]
+		if filterSender != "" && !strings.Contains(m.Sender, filterSender) {
+			continue
+		}
+		result = append(result, m)
+		if len(result) >= limit {
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"messages": result,
+		"count":    len(result),
+	})
+}
+
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	clientMu.Lock()
 	c := client
@@ -623,6 +688,7 @@ func main() {
 
 	http.HandleFunc("/api/send", handleSend)
 	http.HandleFunc("/api/send-media", handleSendMedia)
+	http.HandleFunc("/api/messages", handleMessages)
 	http.HandleFunc("/api/status", handleStatus)
 	http.HandleFunc("/api/health", handleHealth)
 	http.HandleFunc("/api/logout", handleLogout)
