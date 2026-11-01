@@ -97,35 +97,50 @@ def get_status():
     return st
 
 def render_qr(qr_string):
-    """Muestra el código QR en la consola."""
+    """Muestra el código QR compacto en la consola y guarda una imagen limpia."""
     try:
         import qrcode
         qr = qrcode.QRCode(border=1)
         qr.add_data(qr_string)
-        qr.print_ascii(invert=True)
-    except ImportError:
-        # Si no está la librería python qrcode, intentar leer el QR ya formateado del log
-        log_path = BRIDGE_DIR / "bridge.log"
-        if log_path.exists():
-            with open(log_path, "r", errors="ignore") as f:
-                lines = f.readlines()
-            qr_lines = []
-            capturing = False
-            for line in lines[-100:]:
-                if "--- NEW QR CODE RECEIVED ---" in line:
-                    capturing = True
-                    qr_lines = []
-                    continue
-                if capturing:
-                    if line.startswith("█") or line.startswith("▀") or line.startswith("▄"):
-                        qr_lines.append(line)
-                    elif qr_lines:
-                        break
-            if qr_lines:
-                print("".join(qr_lines))
-                return
+        qr.make()
+
+        # Guardar automáticamente como imagen PNG para poder abrirla con visor o celular si se prefiere
+        qr_img_path = BRIDGE_DIR / "whatsapp_qr.png"
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(qr_img_path)
+
+        # Renderizar en terminal con bloques compactos (1 línea por cada 2 filas)
+        modcount = qr.modules_count
+        border = 1
+        lines = []
+        for r in range(-border, modcount + border, 2):
+            row_chars = []
+            for c in range(-border, modcount + border):
+                def get_val(row, col):
+                    if row < 0 or row >= modcount or col < 0 or col >= modcount:
+                        return False
+                    return bool(qr.modules[row][col])
+
+                top = get_val(r, c)
+                bottom = get_val(r + 1, c)
+
+                # Bloques ANSI para terminal con fondo oscuro (invertido natural)
+                if top and bottom:
+                    row_chars.append(" ")
+                elif top and not bottom:
+                    row_chars.append("▄")
+                elif not top and bottom:
+                    row_chars.append("▀")
+                else:
+                    row_chars.append("█")
+            lines.append("".join(row_chars))
+
+        print("\n".join(lines))
+        print(f"\n🖼️  QR guardado también como imagen en: {qr_img_path}")
+        print("💡 Para abrir en pantalla completa: xdg-open " + str(qr_img_path))
+    except Exception as e:
         print(f"QR Raw Data: {qr_string}")
-        print("💡 Tip: Instala 'qrcode' para verlo gráfico en terminal: pip install --user qrcode")
+        print(f"(Error rendering QR: {e})")
 
 def send_message(phone, text):
     """Envía un mensaje a un número telefónico (ej: 5492494123456)."""
