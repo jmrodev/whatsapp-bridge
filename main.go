@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,7 @@ const dbPath = "file:data/examplestore.db?_foreign_keys=on"
 
 var (
 	client    *whatsmeow.Client
+	appDB     *sql.DB
 	lastQR    string
 	clientMu  sync.Mutex
 	clientLog waLog.Logger
@@ -102,6 +104,16 @@ func eventHandler(evt interface{}) {
 				recentMessages = recentMessages[len(recentMessages)-100:]
 			}
 			recentMessagesMu.Unlock()
+
+			// Persist message to SQLite DB
+			if appDB != nil {
+				go func(item IncomingMessage, chatJID string) {
+					_, _ = appDB.Exec(`
+						INSERT OR IGNORE INTO messages (id, chat_jid, sender, push_name, message, is_from_me, timestamp)
+						VALUES (?, ?, ?, ?, ?, ?, ?)
+					`, item.ID, chatJID, item.Sender, item.PushName, item.Message, item.IsFromMe, item.Timestamp)
+				}(msgItem, v.Info.Chat.String())
+			}
 
 			payload := map[string]interface{}{
 				"sender":   realPhoneNumber,
@@ -433,25 +445,114 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		limit = l
 	}
 
-	recentMessagesMu.RLock()
-	defer recentMessagesMu.RUnlock()
-
 	var result []IncomingMessage
-	for i := len(recentMessages) - 1; i >= 0; i-- {
-		m := recentMessages[i]
-		if filterSender != "" && !strings.Contains(m.Sender, filterSender) {
-			continue
+
+	// Query from persistent SQLite DB if available
+	if appDB != nil {
+		query := `SELECT id, sender, push_name, message, is_from_me, timestamp FROM messages`
+		var args []interface{}
+		if filterSender != "" {
+			query += ` WHERE sender LIKE ?`
+			args = append(args, "%"+filterSender+"%")
 		}
-		result = append(result, m)
-		if len(result) >= limit {
-			break
+		query += ` ORDER BY timestamp DESC LIMIT ?`
+		args = append(args, limit)
+
+		rows, err := appDB.Query(query, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var item IncomingMessage
+				var pushName sql.NullString
+				if err := rows.Scan(&item.ID, &item.Sender, &pushName, &item.Message, &item.IsFromMe, &item.Timestamp); err == nil {
+					if pushName.Valid {
+						item.PushName = pushName.String
+					}
+					result = append(result, item)
+				}
+			}
 		}
+	}
+
+	// Fallback to in-memory buffer if DB returned nothing
+	if len(result) == 0 {
+		recentMessagesMu.RLock()
+		for i := len(recentMessages) - 1; i >= 0; i-- {
+			m := recentMessages[i]
+			if filterSender != "" && !strings.Contains(m.Sender, filterSender) {
+				continue
+			}
+			result = append(result, m)
+			if len(result) >= limit {
+				break
+			}
+		}
+		recentMessagesMu.RUnlock()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"messages": result,
 		"count":    len(result),
+	})
+}
+
+func handleContacts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	search := r.URL.Query().Get("q")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+		limit = l
+	}
+
+	type Contact struct {
+		JID          string `json:"jid"`
+		Phone        string `json:"phone"`
+		PushName     string `json:"pushName"`
+		FullName     string `json:"fullName"`
+		BusinessName string `json:"businessName"`
+	}
+
+	var contacts []Contact
+	if appDB != nil {
+		query := `SELECT their_jid, push_name, full_name, business_name FROM whatsmeow_contacts`
+		var args []interface{}
+		if search != "" {
+			query += ` WHERE their_jid LIKE ? OR push_name LIKE ? OR full_name LIKE ? OR business_name LIKE ?`
+			term := "%" + search + "%"
+			args = append(args, term, term, term, term)
+		}
+		query += ` ORDER BY COALESCE(NULLIF(full_name, ''), NULLIF(push_name, ''), their_jid) ASC LIMIT ?`
+		args = append(args, limit)
+
+		rows, err := appDB.Query(query, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var jid, pushName, fullName, businessName sql.NullString
+				if err := rows.Scan(&jid, &pushName, &fullName, &businessName); err == nil {
+					phone := strings.Split(jid.String, "@")[0]
+					contacts = append(contacts, Contact{
+						JID:          jid.String,
+						Phone:        phone,
+						PushName:     pushName.String,
+						FullName:     fullName.String,
+						BusinessName: businessName.String,
+					})
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"contacts": contacts,
+		"count":    len(contacts),
 	})
 }
 
@@ -675,6 +776,27 @@ func main() {
 	dbLog = waLog.Stdout("Database", "INFO", true)
 	clientLog = waLog.Stdout("Client", "INFO", true)
 
+	// Open application SQLite database connection for persistent queries
+	var err error
+	appDB, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to open app DB: %v\n", err)
+	} else {
+		_, _ = appDB.Exec(`
+			CREATE TABLE IF NOT EXISTS messages (
+				id TEXT PRIMARY KEY,
+				chat_jid TEXT,
+				sender TEXT,
+				push_name TEXT,
+				message TEXT,
+				is_from_me BOOLEAN,
+				timestamp DATETIME
+			);
+			CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
+			CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+		`)
+	}
+
 	initialClient, err := buildClient()
 	if err != nil {
 		panic(err)
@@ -689,6 +811,7 @@ func main() {
 	http.HandleFunc("/api/send", handleSend)
 	http.HandleFunc("/api/send-media", handleSendMedia)
 	http.HandleFunc("/api/messages", handleMessages)
+	http.HandleFunc("/api/contacts", handleContacts)
 	http.HandleFunc("/api/status", handleStatus)
 	http.HandleFunc("/api/health", handleHealth)
 	http.HandleFunc("/api/logout", handleLogout)

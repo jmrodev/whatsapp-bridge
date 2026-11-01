@@ -164,7 +164,69 @@ def show_qr():
     else:
         print(f"🖼️ Podés ver la imagen en: {qr_img_path}")
 
+def list_contacts(query="", limit=20):
+    """Busca o lista contactos sincronizados de WhatsApp desde la base de datos local SQLite."""
+    params = []
+    if query:
+        params.append(f"q={urllib.parse.quote(query)}")
+    if limit:
+        params.append(f"limit={limit}")
+    qs = "?" + "&".join(params) if params else ""
+    st = _req("GET", f"/api/contacts{qs}")
+    if not st or "contacts" not in st:
+        print("❌ Error al consultar contactos del bridge.")
+        return
+
+    contacts = st.get("contacts", [])
+    if not contacts:
+        print(f"📭 No se encontraron contactos{' con el término ' + query if query else ''}.")
+        return
+
+    print(f"\n👥 Contactos encontrados ({len(contacts)}):")
+    print("─" * 70)
+    for c in contacts:
+        name = c.get("fullName") or c.get("pushName") or c.get("businessName") or "Sin nombre"
+        phone = c.get("phone", "")
+        extra = []
+        if c.get("pushName") and c.get("pushName") != name:
+            extra.append(f"Push: {c.get('pushName')}")
+        if c.get("businessName") and c.get("businessName") != name:
+            extra.append(f"Empresa: {c.get('businessName')}")
+        extra_str = f" [{', '.join(extra)}]" if extra else ""
+        print(f"• {name:<28} | +{phone:<16}{extra_str}")
+    print("─" * 70)
+
 def list_messages(sender="", limit=10):
+    """Busca o lista contactos sincronizados de WhatsApp desde la base de datos local SQLite."""
+    params = []
+    if query:
+        params.append(f"q={urllib.parse.quote(query)}")
+    if limit:
+        params.append(f"limit={limit}")
+    qs = "?" + "&".join(params) if params else ""
+    st = _req("GET", f"/api/contacts{qs}")
+    if not st or "contacts" not in st:
+        print("❌ Error al consultar contactos del bridge.")
+        return
+
+    contacts = st.get("contacts", [])
+    if not contacts:
+        print(f"📭 No se encontraron contactos{' con el término ' + query if query else ''}.")
+        return
+
+    print(f"\n👥 Contactos encontrados ({len(contacts)}):")
+    print("─" * 70)
+    for c in contacts:
+        name = c.get("fullName") or c.get("pushName") or c.get("businessName") or "Sin nombre"
+        phone = c.get("phone", "")
+        extra = []
+        if c.get("pushName") and c.get("pushName") != name:
+            extra.append(f"Push: {c.get('pushName')}")
+        if c.get("businessName") and c.get("businessName") != name:
+            extra.append(f"Empresa: {c.get('businessName')}")
+        extra_str = f" [{', '.join(extra)}]" if extra else ""
+        print(f"• {name:<28} | +{phone:<16}{extra_str}")
+    print("─" * 70)
     """Muestra los mensajes recientes recibidos en la terminal."""
     params = []
     if sender:
@@ -428,7 +490,8 @@ Gestión del Servicio:
   logout                                Cierra la sesión activa en el dispositivo
 
 Mensajería & Archivos:
-  inbox       [telefono] [limite]       📥 Lee los mensajes recibidos (ej: whatsapp inbox o whatsapp inbox 5492494123456)
+  inbox       [telefono] [limite]       📥 Lee los mensajes recibidos (persistidos en SQLite local)
+  contacts    [busqueda] [limite]       👥 Lista o busca en la agenda de contactos sincronizada
   send        <telefono> ["<mensaje>"]  Envía un mensaje de texto plano o pipe
                                           cat reporte.txt | whatsapp send 5492494123456
   send-file   <telefono> <ruta> [epígrafe]
@@ -461,6 +524,10 @@ if __name__ == "__main__":
         sender = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else ""
         limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else (int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 10)
         list_messages(sender=sender, limit=limit)
+    elif cmd == "contacts":
+        q = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else ""
+        limit = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else (int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 20)
+        list_contacts(query=q, limit=limit)
     elif cmd == "send-file" and len(sys.argv) >= 4:
         cap = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
         send_file(sys.argv[2], sys.argv[3], caption=cap)
