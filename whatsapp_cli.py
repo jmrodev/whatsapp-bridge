@@ -196,13 +196,72 @@ def send_message(phone, text):
     else:
         print(f"❌ Error al enviar mensaje: {st.get('error', st)}")
 
-def logout():
-    """Cierra la sesión de WhatsApp vinculada."""
-    st = _req("POST", "/api/logout")
-    if st and (st.get("success") or st.get("status") == "logged_out"):
-        print("👋 Sesión de WhatsApp cerrada con éxito.")
-    else:
-        print(f"❌ Error al cerrar sesión: {st}")
+def send_file(phone, file_path, caption="", media_type="auto"):
+    """Envía cualquier archivo (imagen, video, audio, documento PDF/ZIP/etc.) a un número."""
+    p = Path(file_path).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        print(f"❌ Error: El archivo '{file_path}' no existe.")
+        return
+
+    clean_phone = "".join(filter(str.isdigit, str(phone)))
+    clean_caption = sanitize_text(caption)
+
+    # Construir multipart/form-data
+    boundary = "----WhatsAppBoundary" + str(int(time.time() * 1000))
+    body = bytearray()
+
+    def add_field(name, val):
+        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{val}\r\n".encode("utf-8"))
+
+    add_field("recipient", clean_phone)
+    if clean_caption:
+        add_field("caption", clean_caption)
+    if media_type:
+        add_field("type", media_type)
+
+    # Archivo
+    filename = p.name
+    with open(p, "rb") as f:
+        file_bytes = f.read()
+
+    body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n".encode("utf-8"))
+    body.extend(file_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+    req = urllib.request.Request(
+        f"{BRIDGE_URL}/api/send-media",
+        data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            content = json.loads(resp.read().decode("utf-8"))
+            if content.get("status") == "sent":
+                print(f"✅ Archivo enviado exitosamente a +{clean_phone}: '{filename}' ({content.get('type')})")
+            else:
+                print(f"❌ Error al enviar archivo: {content}")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="ignore")
+        print(f"❌ Error al enviar archivo: {err or e}")
+    except Exception as e:
+        print(f"❌ Error al conectar con bridge: {e}")
+
+def take_screenshot(target_file):
+    """Toma una captura de pantalla en vivo usando grim o spectacle o import."""
+    for cmd in [["grim", str(target_file)], ["spectacle", "-b", "-n", "-o", str(target_file)], ["import", "-window", "root", str(target_file)]]:
+        if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0 and target_file.exists():
+                return True
+    return False
+
+def take_webcam_photo(target_file):
+    """Toma una foto en vivo desde la webcam usando ffmpeg."""
+    cmd = ["ffmpeg", "-f", "v4l2", "-i", "/dev/video0", "-vframes", "1", "-update", "1", "-y", str(target_file)]
+    res = subprocess.run(cmd, capture_output=True)
+    return res.returncode == 0 and target_file.exists()
 
 def refresh():
     """Fuerza la reconexión con los servidores de WhatsApp."""
@@ -211,6 +270,14 @@ def refresh():
         print("🔄 Reconexión de WhatsApp solicitada. Generando nuevo QR...")
     else:
         print(f"❌ Error al solicitar reconexión: {st}")
+
+def logout():
+    """Cierra la sesión de WhatsApp vinculada."""
+    st = _req("POST", "/api/logout")
+    if st and (st.get("success") or st.get("status") == "logged_out"):
+        print("👋 Sesión de WhatsApp cerrada con éxito.")
+    else:
+        print(f"❌ Error al cerrar sesión: {st}")
 
 USAGE = """
 Uso: whatsapp <comando> [args...]
@@ -222,11 +289,16 @@ Gestión del Servicio:
   refresh                               Fuerza una reconexión con los servidores de WhatsApp
   logout                                Cierra la sesión activa en el dispositivo
 
-Mensajería:
-  send       <telefono> ["<mensaje>"]   Envía un mensaje de WhatsApp (ej: whatsapp send 5492494123456 "Hola")
-                                        Soporta stdin / pipe si se omite el mensaje o se usa '-':
+Mensajería & Archivos:
+  send        <telefono> ["<mensaje>"]  Envía un mensaje de texto plano o pipe
                                           cat reporte.txt | whatsapp send 5492494123456
-                                          echo "Deploy completado" | whatsapp send 5492494123456 -
+  send-file   <telefono> <ruta> [epígrafe]
+                                        Envía cualquier archivo (PDF, ZIP, imagen, video, audio)
+                                          whatsapp send-file 5492494123456 reporte.pdf "Reporte mensual"
+  shot        <telefono> [epígrafe]     📸 Captura en vivo de tu pantalla y la envía al instante
+                                          whatsapp shot 5492494123456 "Captura de mi pantalla"
+  cam         <telefono> [epígrafe]     📷 Toma una foto en vivo con la webcam y la envía
+                                          whatsapp cam 5492494123456 "Foto desde la webcam"
 """
 
 if __name__ == "__main__":
@@ -244,6 +316,27 @@ if __name__ == "__main__":
         refresh()
     elif cmd == "logout":
         logout()
+    elif cmd == "send-file" and len(sys.argv) >= 4:
+        cap = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
+        send_file(sys.argv[2], sys.argv[3], caption=cap)
+    elif cmd == "shot" and len(sys.argv) >= 3:
+        cap = " ".join(sys.argv[3:]) if len(sys.argv) > 3 else "📸 Captura de pantalla"
+        tmp_shot = Path(f"/tmp/screenshot_{int(time.time())}.png")
+        print("📸 Tomando captura de pantalla en vivo...")
+        if take_screenshot(tmp_shot):
+            send_file(sys.argv[2], str(tmp_shot), caption=cap, media_type="image")
+            tmp_shot.unlink(missing_ok=True)
+        else:
+            print("❌ No se pudo tomar la captura. Verificá que grim/spectacle esté instalado.")
+    elif cmd == "cam" and len(sys.argv) >= 3:
+        cap = " ".join(sys.argv[3:]) if len(sys.argv) > 3 else "📷 Foto en vivo desde webcam"
+        tmp_cam = Path(f"/tmp/webcam_{int(time.time())}.jpg")
+        print("📷 Tomando foto en vivo con la webcam...")
+        if take_webcam_photo(tmp_cam):
+            send_file(sys.argv[2], str(tmp_cam), caption=cap, media_type="image")
+            tmp_cam.unlink(missing_ok=True)
+        else:
+            print("❌ No se pudo capturar foto de la webcam (/dev/video0).")
     elif cmd == "send":
         if len(sys.argv) == 3 or (len(sys.argv) >= 4 and sys.argv[3] == "-"):
             # Modo pipe / stdin: verificar si hay datos en sys.stdin

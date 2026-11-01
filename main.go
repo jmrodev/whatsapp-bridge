@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -202,6 +204,168 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+}
+
+func handleSendMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 50 MB max
+	err := r.ParseMultipartForm(50 << 20)
+	if err != nil {
+		http.Error(w, "Failed to parse multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	recipient := r.FormValue("recipient")
+	caption := r.FormValue("caption")
+	mediaTypeParam := r.FormValue("type") // "image", "document", "audio", "video", or "auto"
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file field is required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file data: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	clientMu.Lock()
+	c := client
+	clientMu.Unlock()
+
+	if c == nil || !isClientAuthenticated(c) || !c.IsConnected() {
+		http.Error(w, "WhatsApp bridge not available or authenticated", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Resolve JID
+	var recipientJID types.JID
+	rawPhone := strings.TrimPrefix(recipient, "+")
+	var cleanPhone string
+	if strings.HasPrefix(rawPhone, "549") {
+		cleanPhone = "54" + rawPhone[3:]
+	} else {
+		cleanPhone = rawPhone
+	}
+
+	numbersToCheck := []string{"+" + recipient, recipient, "+" + cleanPhone, cleanPhone, "+" + rawPhone, rawPhone}
+	onWA, errOnWA := c.IsOnWhatsApp(context.Background(), numbersToCheck)
+	found := false
+	if errOnWA == nil {
+		for _, item := range onWA {
+			if item.IsIn {
+				recipientJID = item.JID
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		recipientJID, _ = types.ParseJID(cleanPhone + "@s.whatsapp.net")
+	}
+
+	// Detect MIME type
+	mimetype := header.Header.Get("Content-Type")
+	if mimetype == "" || mimetype == "application/octet-stream" {
+		ext := filepath.Ext(header.Filename)
+		mimetype = mime.TypeByExtension(ext)
+		if mimetype == "" {
+			mimetype = http.DetectContentType(fileData)
+		}
+	}
+
+	fileName := header.Filename
+	var waMediaType whatsmeow.MediaType
+	if mediaTypeParam == "image" || strings.HasPrefix(mimetype, "image/") {
+		waMediaType = whatsmeow.MediaImage
+	} else if mediaTypeParam == "video" || strings.HasPrefix(mimetype, "video/") {
+		waMediaType = whatsmeow.MediaVideo
+	} else if mediaTypeParam == "audio" || strings.HasPrefix(mimetype, "audio/") {
+		waMediaType = whatsmeow.MediaAudio
+	} else {
+		waMediaType = whatsmeow.MediaDocument
+	}
+
+	// Upload to WhatsApp
+	resp, err := c.Upload(context.Background(), fileData, waMediaType)
+	if err != nil {
+		http.Error(w, "Failed to upload media to WhatsApp: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build Protobuf message
+	var msg waE2E.Message
+	fileLen := uint64(len(fileData))
+
+	switch waMediaType {
+	case whatsmeow.MediaImage:
+		msg.ImageMessage = &waE2E.ImageMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &fileLen,
+		}
+	case whatsmeow.MediaVideo:
+		msg.VideoMessage = &waE2E.VideoMessage{
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &fileLen,
+		}
+	case whatsmeow.MediaAudio:
+		isPTT := mediaTypeParam == "voice"
+		msg.AudioMessage = &waE2E.AudioMessage{
+			Mimetype:      proto.String(mimetype),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &fileLen,
+			PTT:           &isPTT,
+		}
+	default:
+		msg.DocumentMessage = &waE2E.DocumentMessage{
+			Title:         proto.String(fileName),
+			FileName:      proto.String(fileName),
+			Caption:       proto.String(caption),
+			Mimetype:      proto.String(mimetype),
+			URL:           &resp.URL,
+			DirectPath:    &resp.DirectPath,
+			MediaKey:      resp.MediaKey,
+			FileEncSHA256: resp.FileEncSHA256,
+			FileSHA256:    resp.FileSHA256,
+			FileLength:    &fileLen,
+		}
+	}
+
+	_, err = c.SendMessage(context.Background(), recipientJID, &msg)
+	if err != nil {
+		http.Error(w, "Failed to send media message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "sent",
+		"filename": fileName,
+		"type":     string(waMediaType),
+	})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +600,7 @@ func main() {
 	connectClient()
 
 	http.HandleFunc("/api/send", handleSend)
+	http.HandleFunc("/api/send-media", handleSendMedia)
 	http.HandleFunc("/api/status", handleStatus)
 	http.HandleFunc("/api/health", handleHealth)
 	http.HandleFunc("/api/logout", handleLogout)
