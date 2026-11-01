@@ -306,16 +306,26 @@ def take_webcam_photo(target_file):
     return res.returncode == 0 and target_file.exists()
 
 def record_voice_note(target_file, seconds=5):
-    """Graba una nota de voz en vivo desde el micrófono usando el perfil nativo de WhatsApp (Opus Mono 16kHz)."""
+    """
+    Graba una nota de voz en vivo desde el micrófono usando el perfil estricto
+    de timestamps y Opus requerido por los parsers de WhatsApp móvil:
+      -af asetpts=N/SR/TB : Normaliza la tabla de PTS (Presentation Timestamps)
+      -ar 48000           : Frecuencia nativa de Opus
+      -ac 1               : Mono estricto
+      -application voip   : Perfil VoIP de baja latencia
+      -f ogg              : Contenedor Ogg nativo
+    """
     cmd = [
         "ffmpeg", "-f", "pulse", "-i", "default",
         "-t", str(seconds),
-        "-c:a", "libopus",
-        "-b:a", "32k",
-        "-vbr", "on",
-        "-compression_level", "10",
-        "-ar", "16000",
+        "-vn",
+        "-af", "asetpts=N/SR/TB",
         "-ac", "1",
+        "-ar", "48000",
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-application", "voip",
+        "-f", "ogg",
         "-v", "error",
         "-y", str(target_file)
     ]
@@ -323,16 +333,18 @@ def record_voice_note(target_file, seconds=5):
     if res.returncode == 0 and target_file.exists() and target_file.stat().st_size > 1000:
         return True
 
-    # Fallback con alsa si pulse falla
+    # Fallback con alsa si pulse no responde
     cmd_alsa = [
         "ffmpeg", "-f", "alsa", "-i", "default",
         "-t", str(seconds),
-        "-c:a", "libopus",
-        "-b:a", "32k",
-        "-vbr", "on",
-        "-compression_level", "10",
-        "-ar", "16000",
+        "-vn",
+        "-af", "asetpts=N/SR/TB",
         "-ac", "1",
+        "-ar", "48000",
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-application", "voip",
+        "-f", "ogg",
         "-v", "error",
         "-y", str(target_file)
     ]
