@@ -306,14 +306,15 @@ def take_webcam_photo(target_file):
     return res.returncode == 0 and target_file.exists()
 
 def record_voice_note(target_file, seconds=5):
-    """Graba una nota de voz en vivo desde el micrófono por N segundos usando ffmpeg con Opus."""
-    # Probar con el dispositivo pulse por defecto
+    """Graba una nota de voz en vivo desde el micrófono usando el perfil nativo de WhatsApp (Opus Mono 16kHz)."""
     cmd = [
         "ffmpeg", "-f", "pulse", "-i", "default",
         "-t", str(seconds),
         "-c:a", "libopus",
-        "-b:a", "64k",
-        "-ar", "48000",
+        "-b:a", "32k",
+        "-vbr", "on",
+        "-compression_level", "10",
+        "-ar", "16000",
         "-ac", "1",
         "-v", "error",
         "-y", str(target_file)
@@ -322,13 +323,15 @@ def record_voice_note(target_file, seconds=5):
     if res.returncode == 0 and target_file.exists() and target_file.stat().st_size > 1000:
         return True
 
-    # Fallback con alsa directo si pulse no captura
+    # Fallback con alsa si pulse falla
     cmd_alsa = [
         "ffmpeg", "-f", "alsa", "-i", "default",
         "-t", str(seconds),
         "-c:a", "libopus",
-        "-b:a", "64k",
-        "-ar", "48000",
+        "-b:a", "32k",
+        "-vbr", "on",
+        "-compression_level", "10",
+        "-ar", "16000",
         "-ac", "1",
         "-v", "error",
         "-y", str(target_file)
