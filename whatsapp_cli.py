@@ -264,16 +264,34 @@ def take_webcam_photo(target_file):
     return res.returncode == 0 and target_file.exists()
 
 def record_voice_note(target_file, seconds=5):
-    """Graba una nota de voz en vivo desde el micrófono por N segundos usando ffmpeg."""
+    """Graba una nota de voz en vivo desde el micrófono por N segundos usando ffmpeg con Opus."""
+    # Probar con el dispositivo pulse por defecto
     cmd = [
         "ffmpeg", "-f", "pulse", "-i", "default",
         "-t", str(seconds),
         "-c:a", "libopus",
         "-b:a", "64k",
+        "-ar", "48000",
+        "-ac", "1",
         "-v", "error",
         "-y", str(target_file)
     ]
     res = subprocess.run(cmd, capture_output=True)
+    if res.returncode == 0 and target_file.exists() and target_file.stat().st_size > 1000:
+        return True
+
+    # Fallback con alsa directo si pulse no captura
+    cmd_alsa = [
+        "ffmpeg", "-f", "alsa", "-i", "default",
+        "-t", str(seconds),
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-ar", "48000",
+        "-ac", "1",
+        "-v", "error",
+        "-y", str(target_file)
+    ]
+    res = subprocess.run(cmd_alsa, capture_output=True)
     return res.returncode == 0 and target_file.exists()
 
 def refresh():
