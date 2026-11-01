@@ -199,7 +199,10 @@ Gestión del Servicio:
   logout                                Cierra la sesión activa en el dispositivo
 
 Mensajería:
-  send       <telefono> "<mensaje>"     Envía un mensaje de WhatsApp (ej: whatsapp send 5492494123456 "Hola")
+  send       <telefono> ["<mensaje>"]   Envía un mensaje de WhatsApp (ej: whatsapp send 5492494123456 "Hola")
+                                        Soporta stdin / pipe si se omite el mensaje o se usa '-':
+                                          cat reporte.txt | whatsapp send 5492494123456
+                                          echo "Deploy completado" | whatsapp send 5492494123456 -
 """
 
 if __name__ == "__main__":
@@ -217,7 +220,23 @@ if __name__ == "__main__":
         refresh()
     elif cmd == "logout":
         logout()
-    elif cmd == "send" and len(sys.argv) >= 4:
-        send_message(sys.argv[2], sys.argv[3])
+    elif cmd == "send":
+        if len(sys.argv) == 3 or (len(sys.argv) >= 4 and sys.argv[3] == "-"):
+            # Modo pipe / stdin: verificar si hay datos en sys.stdin
+            if not sys.stdin.isatty():
+                content = sys.stdin.read().strip()
+                if not content:
+                    print("❌ Error: La entrada por pipe está vacía.")
+                    sys.exit(1)
+                send_message(sys.argv[2], content)
+            else:
+                print("❌ Error: No se especificó mensaje ni se pasaron datos por pipe.")
+                print("   Uso: echo 'Hola' | whatsapp send <telefono>")
+                print("   O:   whatsapp send <telefono> 'Hola'")
+                sys.exit(1)
+        elif len(sys.argv) >= 4:
+            send_message(sys.argv[2], " ".join(sys.argv[3:]))
+        else:
+            print(USAGE)
     else:
         print(USAGE)
