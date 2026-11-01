@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -333,7 +335,8 @@ func handleSendMedia(w http.ResponseWriter, r *http.Request) {
 		if isPTT || strings.HasSuffix(strings.ToLower(fileName), ".ogg") {
 			audioMime = "audio/ogg; codecs=opus"
 		}
-		msg.AudioMessage = &waE2E.AudioMessage{
+
+		audioMsg := &waE2E.AudioMessage{
 			Mimetype:      proto.String(audioMime),
 			URL:           &resp.URL,
 			DirectPath:    &resp.DirectPath,
@@ -343,6 +346,21 @@ func handleSendMedia(w http.ResponseWriter, r *http.Request) {
 			FileLength:    &fileLen,
 			PTT:           &isPTT,
 		}
+
+		if isPTT {
+			// Leer waveform si viene en el form (64 bytes hex o base64) o generarlo
+			wfHex := r.FormValue("waveform")
+			if wfBytes, err := hex.DecodeString(wfHex); err == nil && len(wfBytes) == 64 {
+				audioMsg.Waveform = wfBytes
+			}
+			secStr := r.FormValue("seconds")
+			if s, err := strconv.ParseUint(secStr, 10, 32); err == nil && s > 0 {
+				u32s := uint32(s)
+				audioMsg.Seconds = &u32s
+			}
+		}
+
+		msg.AudioMessage = audioMsg
 	default:
 		msg.DocumentMessage = &waE2E.DocumentMessage{
 			Title:         proto.String(fileName),

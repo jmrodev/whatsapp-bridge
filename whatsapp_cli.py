@@ -13,6 +13,8 @@ import sys
 import re
 import json
 import time
+import math
+import struct
 import subprocess
 import urllib.request
 import urllib.error
@@ -196,6 +198,40 @@ def send_message(phone, text):
     else:
         print(f"❌ Error al enviar mensaje: {st.get('error', st)}")
 
+def calculate_waveform_and_duration(audio_path):
+    """Calcula 64 puntos de waveform y la duración en segundos del audio para WhatsApp PTT."""
+    duration = 5
+    waveform_hex = ""
+    try:
+        # 1. Duración con ffprobe
+        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)]
+        res = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            duration = max(1, int(round(float(res.stdout.strip()))))
+
+        # 2. Decodificar PCM a 8kHz mono para calcular 64 barras de onda
+        pcm_cmd = ["ffmpeg", "-i", str(audio_path), "-f", "s16le", "-ac", "1", "-ar", "8000", "-"]
+        proc = subprocess.Popen(pcm_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        raw_pcm, _ = proc.communicate()
+
+        if raw_pcm and len(raw_pcm) >= 128:
+            samples = [struct.unpack("<h", raw_pcm[i:i+2])[0] for i in range(0, len(raw_pcm), 2)]
+            chunk_size = max(1, len(samples) // 64)
+            wf = []
+            for i in range(64):
+                chunk = samples[i * chunk_size : (i + 1) * chunk_size]
+                if not chunk:
+                    wf.append(5)
+                    continue
+                rms = math.sqrt(sum(s**2 for s in chunk) / len(chunk))
+                # Escalar a 0-100 para WhatsApp
+                val = min(100, max(5, int((rms / 32768.0) * 250)))
+                wf.append(val)
+            waveform_hex = bytes(wf).hex()
+    except Exception:
+        pass
+    return duration, waveform_hex
+
 def send_file(phone, file_path, caption="", media_type="auto"):
     """Envía cualquier archivo (imagen, video, audio, documento PDF/ZIP/etc.) a un número."""
     p = Path(file_path).expanduser().resolve()
@@ -218,6 +254,12 @@ def send_file(phone, file_path, caption="", media_type="auto"):
         add_field("caption", clean_caption)
     if media_type:
         add_field("type", media_type)
+
+    if media_type == "voice" or p.suffix.lower() == ".ogg":
+        duration, wf_hex = calculate_waveform_and_duration(p)
+        if wf_hex:
+            add_field("waveform", wf_hex)
+        add_field("seconds", str(duration))
 
     # Archivo
     filename = p.name
