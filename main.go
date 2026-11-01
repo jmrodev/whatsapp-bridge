@@ -328,7 +328,7 @@ func handleSendMedia(w http.ResponseWriter, r *http.Request) {
 			FileLength:    &fileLen,
 		}
 	case whatsmeow.MediaAudio:
-		isPTT := mediaTypeParam == "voice"
+		isPTT := mediaTypeParam == "voice" || strings.HasSuffix(strings.ToLower(fileName), ".ogg")
 		msg.AudioMessage = &waE2E.AudioMessage{
 			Mimetype:      proto.String(mimetype),
 			URL:           &resp.URL,

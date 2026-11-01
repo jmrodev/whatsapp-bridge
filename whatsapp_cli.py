@@ -263,6 +263,19 @@ def take_webcam_photo(target_file):
     res = subprocess.run(cmd, capture_output=True)
     return res.returncode == 0 and target_file.exists()
 
+def record_voice_note(target_file, seconds=5):
+    """Graba una nota de voz en vivo desde el micrófono por N segundos usando ffmpeg."""
+    cmd = [
+        "ffmpeg", "-f", "pulse", "-i", "default",
+        "-t", str(seconds),
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-v", "error",
+        "-y", str(target_file)
+    ]
+    res = subprocess.run(cmd, capture_output=True)
+    return res.returncode == 0 and target_file.exists()
+
 def refresh():
     """Fuerza la reconexión con los servidores de WhatsApp."""
     st = _req("POST", "/api/refresh")
@@ -299,6 +312,8 @@ Mensajería & Archivos:
                                           whatsapp shot 5492494123456 "Captura de mi pantalla"
   cam         <telefono> [epígrafe]     📷 Toma una foto en vivo con la webcam y la envía
                                           whatsapp cam 5492494123456 "Foto desde la webcam"
+  voice       <telefono> [segundos]     🎙️ Graba y envía una nota de voz en vivo (PTT / onda azul)
+                                          whatsapp voice 5492494123456 5
 """
 
 if __name__ == "__main__":
@@ -337,6 +352,16 @@ if __name__ == "__main__":
             tmp_cam.unlink(missing_ok=True)
         else:
             print("❌ No se pudo capturar foto de la webcam (/dev/video0).")
+    elif cmd == "voice" and len(sys.argv) >= 3:
+        dur = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 5
+        tmp_audio = Path(f"/tmp/voice_{int(time.time())}.ogg")
+        print(f"🎙️ Grabando nota de voz durante {dur} segundos... ¡Hablá ahora!")
+        if record_voice_note(tmp_audio, seconds=dur):
+            print("📤 Enviando nota de voz...")
+            send_file(sys.argv[2], str(tmp_audio), caption="", media_type="voice")
+            tmp_audio.unlink(missing_ok=True)
+        else:
+            print("❌ Error al grabar audio del micrófono.")
     elif cmd == "send":
         if len(sys.argv) == 3 or (len(sys.argv) >= 4 and sys.argv[3] == "-"):
             # Modo pipe / stdin: verificar si hay datos en sys.stdin
