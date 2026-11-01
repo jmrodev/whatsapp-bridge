@@ -10,11 +10,13 @@ Permite:
 """
 import os
 import sys
+import re
 import json
 import time
 import subprocess
 import urllib.request
 import urllib.error
+import unicodedata
 from pathlib import Path
 
 BRIDGE_DIR = Path(__file__).resolve().parent
@@ -160,15 +162,37 @@ def show_qr():
     else:
         print(f"🖼️ Podés ver la imagen en: {qr_img_path}")
 
+def sanitize_text(text: str) -> str:
+    """
+    Limpia secuencias de escape ANSI (colores de terminal) y glifos privados
+    de fuentes (NerdFonts / eza / bat) para que el mensaje llegue como texto plano
+    limpio y legible a WhatsApp sin caracteres corruptos ni [34m.
+    """
+    if not text:
+        return ""
+    # 1. Eliminar secuencias de escape ANSI (\x1b[34m, \x1b[0m, etc.)
+    ansi_regex = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    text = ansi_regex.sub('', text)
+
+    # 2. Filtrar caracteres de NerdFont (Unicode Private Use Area)
+    cleaned_chars = []
+    for ch in text:
+        cp = ord(ch)
+        if (0xE000 <= cp <= 0xF8FF) or (0xF0000 <= cp <= 0xFFFFD) or unicodedata.category(ch) == 'Co':
+            continue
+        cleaned_chars.append(ch)
+    return "".join(cleaned_chars)
+
 def send_message(phone, text):
     """Envía un mensaje a un número telefónico (ej: 5492494123456)."""
     clean_phone = "".join(filter(str.isdigit, str(phone)))
-    st = _req("POST", "/api/send", {"recipient": clean_phone, "message": text})
+    clean_text = sanitize_text(text)
+    st = _req("POST", "/api/send", {"recipient": clean_phone, "message": clean_text})
     if st is None:
         print("❌ Error: El servicio WhatsApp Bridge no está corriendo. Ejecutá 'whatsapp start'.")
         return
     if st.get("status") == "sent" or st.get("success"):
-        print(f"✅ Mensaje enviado a +{clean_phone}: '{text}'")
+        print(f"✅ Mensaje enviado a +{clean_phone}: '{clean_text[:60]}...'")
     else:
         print(f"❌ Error al enviar mensaje: {st.get('error', st)}")
 
