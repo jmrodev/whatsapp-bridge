@@ -19,7 +19,7 @@ from pathlib import Path
 
 BRIDGE_DIR = Path(__file__).resolve().parent
 BRIDGE_BIN = BRIDGE_DIR / "whatsapp-bridge-server"
-BRIDGE_PORT = int(os.environ.get("WHATSAPP_PORT", "8080"))
+BRIDGE_PORT = int(os.environ.get("WHATSAPP_PORT", "8090"))
 BRIDGE_URL = f"http://localhost:{BRIDGE_PORT}"
 
 def _req(method, endpoint, payload=None):
@@ -30,6 +30,9 @@ def _req(method, endpoint, payload=None):
         with urllib.request.urlopen(req, timeout=5) as resp:
             content = resp.read().decode("utf-8")
             return json.loads(content) if content else {}
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8", errors="ignore")
+        return {"error": err_msg or str(e), "status_code": e.code}
     except urllib.error.URLError:
         return None
     except Exception as e:
@@ -54,14 +57,26 @@ def start_server():
         return
 
     print("🚀 Levantando WhatsApp Bridge en background...")
-    log_file = open(BRIDGE_DIR / "bridge.log", "a")
-    proc = subprocess.Popen([str(BRIDGE_BIN)], cwd=str(BRIDGE_DIR), stdout=log_file, stderr=log_file)
-    time.sleep(1.5)
-    st = _req("GET", "/api/health")
-    if st is not None:
-        print(f"✅ Bridge iniciado con éxito en {BRIDGE_URL} (PID: {proc.pid})")
-    else:
-        print("⚠️ El bridge se inició. Verificá con 'whatsapp status'.")
+    log_path = BRIDGE_DIR / "bridge.log"
+    with open(log_path, "a") as log_file:
+        proc = subprocess.Popen(
+            [str(BRIDGE_BIN)],
+            cwd=str(BRIDGE_DIR),
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+            close_fds=True
+        )
+
+    # Esperar hasta 5 segundos a que el puerto responda
+    for _ in range(10):
+        time.sleep(0.5)
+        st = _req("GET", "/api/health")
+        if st is not None:
+            print(f"✅ Bridge iniciado con éxito en {BRIDGE_URL} (PID: {proc.pid})")
+            return
+
+    print("⚠️ El bridge se inició pero aún no responde en el puerto. Verificá con 'whatsapp status'.")
 
 def get_status():
     """Consulta el estado del bridge y sesión."""
@@ -69,13 +84,16 @@ def get_status():
     if not st:
         print("🔴 El servidor WhatsApp Bridge está APAGADO. Iniciálo con: 'whatsapp start'")
         return
+    status_str = st.get('status', '')
+    is_connected = status_str == 'connected'
+    qr_code = st.get('qr_code') or st.get('qr')
+
     print("\n📱 Estado de WhatsApp:")
-    print(f"   Logueado       : {'✅ Sí' if st.get('isLoggedIn') else '❌ No (Requiere escaneo QR)'}")
-    print(f"   Conectado      : {'🟢 Conectado' if st.get('isConnected') else '🟡 Desconectado'}")
-    print(f"   Reconexión     : {st.get('reconnectState', 'idle')}")
-    if not st.get('isLoggedIn') and st.get('qr'):
+    print(f"   Estado         : {'🟢 Conectado' if is_connected else f'🟡 {status_str}'}")
+    print(f"   Logueado       : {'✅ Sí' if is_connected else '❌ No (Requiere escaneo QR)'}")
+    if not is_connected and qr_code:
         print("\n📷 Escaneá este código QR en WhatsApp (Dispositivos vinculados):\n")
-        render_qr(st.get('qr'))
+        render_qr(qr_code)
     return st
 
 def render_qr(qr_string):
@@ -86,20 +104,40 @@ def render_qr(qr_string):
         qr.add_data(qr_string)
         qr.print_ascii(invert=True)
     except ImportError:
+        # Si no está la librería python qrcode, intentar leer el QR ya formateado del log
+        log_path = BRIDGE_DIR / "bridge.log"
+        if log_path.exists():
+            with open(log_path, "r", errors="ignore") as f:
+                lines = f.readlines()
+            qr_lines = []
+            capturing = False
+            for line in lines[-100:]:
+                if "--- NEW QR CODE RECEIVED ---" in line:
+                    capturing = True
+                    qr_lines = []
+                    continue
+                if capturing:
+                    if line.startswith("█") or line.startswith("▀") or line.startswith("▄"):
+                        qr_lines.append(line)
+                    elif qr_lines:
+                        break
+            if qr_lines:
+                print("".join(qr_lines))
+                return
         print(f"QR Raw Data: {qr_string}")
-        print("💡 Tip: Instala 'qrcode' para verlo gráfico en terminal: pip install qrcode")
+        print("💡 Tip: Instala 'qrcode' para verlo gráfico en terminal: pip install --user qrcode")
 
 def send_message(phone, text):
     """Envía un mensaje a un número telefónico (ej: 5492494123456)."""
     clean_phone = "".join(filter(str.isdigit, str(phone)))
-    st = _req("POST", "/api/send", {"phone": clean_phone, "message": text})
-    if not st:
+    st = _req("POST", "/api/send", {"recipient": clean_phone, "message": text})
+    if st is None:
         print("❌ Error: El servicio WhatsApp Bridge no está corriendo. Ejecutá 'whatsapp start'.")
         return
-    if st.get("success"):
+    if st.get("status") == "sent" or st.get("success"):
         print(f"✅ Mensaje enviado a +{clean_phone}: '{text}'")
     else:
-        print(f"❌ Error al enviar mensaje: {st.get('error')}")
+        print(f"❌ Error al enviar mensaje: {st.get('error', st)}")
 
 def logout():
     """Cierra la sesión de WhatsApp vinculada."""
