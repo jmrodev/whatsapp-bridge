@@ -97,50 +97,68 @@ def get_status():
     return st
 
 def render_qr(qr_string):
-    """Muestra el código QR compacto en la consola y guarda una imagen limpia."""
+    """Muestra el código QR compacto y lo abre en ventana si el entorno lo permite."""
+    qr_img_path = BRIDGE_DIR / "whatsapp_qr.png"
+
+    # 1. Generar PNG limpio de alta calidad con qrencode o PIL
     try:
         import qrcode
-        qr = qrcode.QRCode(border=1)
+        qr = qrcode.QRCode(border=2)
         qr.add_data(qr_string)
         qr.make()
-
-        # Guardar automáticamente como imagen PNG para poder abrirla con visor o celular si se prefiere
-        qr_img_path = BRIDGE_DIR / "whatsapp_qr.png"
         img = qr.make_image(fill_color="black", back_color="white")
         img.save(qr_img_path)
+    except Exception:
+        subprocess.run(["qrencode", "-o", str(qr_img_path), "-s", "8", "-m", "2", qr_string], capture_output=True)
 
-        # Renderizar en terminal con bloques compactos (1 línea por cada 2 filas)
-        modcount = qr.modules_count
-        border = 1
-        lines = []
-        for r in range(-border, modcount + border, 2):
-            row_chars = []
-            for c in range(-border, modcount + border):
-                def get_val(row, col):
-                    if row < 0 or row >= modcount or col < 0 or col >= modcount:
-                        return False
-                    return bool(qr.modules[row][col])
+    # 2. Renderizado en terminal mediante qrencode UTF8 (máxima legibilidad y tamaño ajustado)
+    res = subprocess.run(["qrencode", "-t", "UTF8", "-m", "1", qr_string], capture_output=True, text=True)
+    if res.returncode == 0 and res.stdout:
+        print(res.stdout)
+    else:
+        # Fallback manual con bloques unicode
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(qr_string)
+            qr.make()
+            modcount = qr.modules_count
+            lines = []
+            for r in range(-1, modcount + 1, 2):
+                row = []
+                for c in range(-1, modcount + 1):
+                    def v(y, x):
+                        return 0 <= y < modcount and 0 <= x < modcount and qr.modules[y][x]
+                    top, bot = v(r, c), v(r + 1, c)
+                    row.append(" " if top and bot else ("▄" if top else ("▀" if bot else "█")))
+                lines.append("".join(row))
+            print("\n".join(lines))
+        except Exception:
+            print(f"QR Raw Data: {qr_string}")
 
-                top = get_val(r, c)
-                bottom = get_val(r + 1, c)
+    print(f"\n🖼️  Imagen generada: {qr_img_path}")
+    print("💡 Si preferís verlo en ventana flotante, ejecutá: whatsapp show")
 
-                # Bloques ANSI para terminal con fondo oscuro (invertido natural)
-                if top and bottom:
-                    row_chars.append(" ")
-                elif top and not bottom:
-                    row_chars.append("▄")
-                elif not top and bottom:
-                    row_chars.append("▀")
-                else:
-                    row_chars.append("█")
-            lines.append("".join(row_chars))
-
-        print("\n".join(lines))
-        print(f"\n🖼️  QR guardado también como imagen en: {qr_img_path}")
-        print("💡 Para abrir en pantalla completa: xdg-open " + str(qr_img_path))
-    except Exception as e:
-        print(f"QR Raw Data: {qr_string}")
-        print(f"(Error rendering QR: {e})")
+def show_qr():
+    """Abre la imagen del QR en una ventana gráfica flotante."""
+    st = _req("GET", "/api/status")
+    if not st or not st.get("qr_code"):
+        print("❌ No hay un código QR activo en este momento. Verificá con 'whatsapp status'.")
+        return
+    qr_img_path = BRIDGE_DIR / "whatsapp_qr.png"
+    if not qr_img_path.exists():
+        get_status()
+    # Intentar abrir con el visor preferido del sistema (nsxiv, xdg-open, etc.)
+    viewer = None
+    for cmd in ["nsxiv", "xdg-open", "display"]:
+        if subprocess.run(["which", cmd], capture_output=True).returncode == 0:
+            viewer = cmd
+            break
+    if viewer:
+        print(f"🚀 Abriendo QR en ventana ({viewer})...")
+        subprocess.Popen([viewer, str(qr_img_path)], start_new_session=True, close_fds=True)
+    else:
+        print(f"🖼️ Podés ver la imagen en: {qr_img_path}")
 
 def send_message(phone, text):
     """Envía un mensaje a un número telefónico (ej: 5492494123456)."""
@@ -157,18 +175,18 @@ def send_message(phone, text):
 def logout():
     """Cierra la sesión de WhatsApp vinculada."""
     st = _req("POST", "/api/logout")
-    if st and st.get("success"):
+    if st and (st.get("success") or st.get("status") == "logged_out"):
         print("👋 Sesión de WhatsApp cerrada con éxito.")
     else:
-        print("❌ Error al cerrar sesión.")
+        print(f"❌ Error al cerrar sesión: {st}")
 
 def refresh():
     """Fuerza la reconexión con los servidores de WhatsApp."""
     st = _req("POST", "/api/refresh")
-    if st and st.get("success"):
-        print("🔄 Reconexión de WhatsApp solicitada.")
+    if st and (st.get("success") or st.get("status") == "refreshing"):
+        print("🔄 Reconexión de WhatsApp solicitada. Generando nuevo QR...")
     else:
-        print("❌ Error al solicitar reconexión.")
+        print(f"❌ Error al solicitar reconexión: {st}")
 
 USAGE = """
 Uso: whatsapp <comando> [args...]
@@ -176,6 +194,7 @@ Uso: whatsapp <comando> [args...]
 Gestión del Servicio:
   start                                 Inicia el servidor bridge en segundo plano
   status                                Muestra si está conectado o imprime el QR de vinculación
+  show                                  Abre el código QR en una ventana flotante (nsxiv/visor de imágenes)
   refresh                               Fuerza una reconexión con los servidores de WhatsApp
   logout                                Cierra la sesión activa en el dispositivo
 
@@ -192,6 +211,8 @@ if __name__ == "__main__":
         start_server()
     elif cmd == "status":
         get_status()
+    elif cmd == "show":
+        show_qr()
     elif cmd == "refresh":
         refresh()
     elif cmd == "logout":
