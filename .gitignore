@@ -1,0 +1,4 @@
+data/
+*.db
+bridge.log
+whatsapp-bridge-server
